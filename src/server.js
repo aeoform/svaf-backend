@@ -2,6 +2,7 @@ import http from 'node:http';
 import postgres from 'postgres';
 import { signToken, verifyToken } from './token.js';
 import { verifyPassword } from './password.js';
+import { findUserByEmail } from './users.js';
 
 const port = Number(process.env.PORT || 8787);
 const databaseUrl = process.env.DATABASE_URL;
@@ -91,14 +92,7 @@ async function loginHandler(req, res) {
 		return json(res, 400, { ok: false, error: 'email and password are required' });
 	}
 
-	const users = await sql`
-		select id, email, display_name, role, password_hash, is_active
-		from auth_users
-		where email = ${email}
-		limit 1
-	`;
-
-	const user = users[0];
+	const user = await findUserByEmail(sql, email);
 	if (!user || !user.is_active) {
 		return json(res, 401, { ok: false, error: 'invalid credentials' });
 	}

@@ -5,7 +5,8 @@
 	"scripts": {
 		"dev": "node --watch --env-file=.env src/server.js",
 		"start": "node --env-file=.env src/server.js",
-		"hash-password": "node src/hash-password.js"
+		"hash-password": "node src/hash-password.js",
+		"seed-user": "node --env-file=.env src/seed-user.js"
 	},
 	"dependencies": {
 		"postgres": "^3.4.7"

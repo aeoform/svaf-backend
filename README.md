@@ -29,16 +29,23 @@ Run `sql/schema.sql` in PostgreSQL first.
 ## Run
 
 ```bash
-cd /opt/svaf/backend
+cd /opt/svaf-backend
 pnpm install
 pnpm start
+```
+
+## Create the first account
+
+```bash
+cd /opt/svaf-backend
+EMAIL=admin@example.com PASSWORD='your-password' DISPLAY_NAME='Admin' ROLE=admin pnpm seed-user
 ```
 
 ## Create a password hash
 
 ```bash
-cd /opt/svaf/backend
+cd /opt/svaf-backend
 pnpm hash-password
 ```
 
-Use the printed hash in `auth_users.password_hash`.
+Use the printed hash if you want to insert users manually.
