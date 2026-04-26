@@ -6,8 +6,10 @@ import { findUserByEmail } from './users.js';
 import {
 	ensureAiSchema,
 	getActiveAiStreamJob,
+	getAiImageStatus,
 	getAiModelStatus,
 	getAiConversation,
+	generateAiImage,
 	listAiConversations,
 	listAiMessages,
 	pullAiChatStream,
@@ -266,6 +268,40 @@ async function modelStatusHandler(req, res) {
 	});
 }
 
+async function imageStatusHandler(req, res) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	return json(res, 200, {
+		ok: true,
+		status: getAiImageStatus()
+	});
+}
+
+async function imageGenerateHandler(req, res) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	let payload;
+	try {
+		payload = await readJson(req);
+	} catch (error) {
+		return json(res, 400, { ok: false, error: error.message });
+	}
+
+	try {
+		const result = await generateAiImage({
+			prompt: payload.prompt,
+			model: payload.model,
+			size: payload.size
+		});
+
+		return json(res, 200, { ok: true, image: result });
+	} catch (error) {
+		return json(res, 400, { ok: false, error: error.message || 'image generation failed' });
+	}
+}
+
 await ensureAiSchema(sql);
 
 const server = http.createServer(async (req, res) => {
@@ -318,6 +354,16 @@ const server = http.createServer(async (req, res) => {
 
 	if (req.method === 'GET' && url.pathname === '/ai/model-status') {
 		await modelStatusHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'GET' && url.pathname === '/ai/image-status') {
+		await imageStatusHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'POST' && url.pathname === '/ai/image/generate') {
+		await imageGenerateHandler(req, res);
 		return;
 	}
 

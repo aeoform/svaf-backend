@@ -72,6 +72,27 @@ function getModelSettings() {
 	};
 }
 
+function getImageSettings() {
+	const baseUrl =
+		String(process.env.TOKEN_PLAN_BASE_URL || '').trim() ||
+		'https://token-plan.cn-beijing.maas.aliyuncs.com';
+	const apiKey = String(process.env.TOKEN_PLAN_API_KEY || '').trim();
+	const model = String(process.env.TOKEN_PLAN_MODEL || '').trim() || 'qwen-image-2.0';
+	const size = String(process.env.TOKEN_PLAN_IMAGE_SIZE || '').trim() || '1024*1024';
+	const path =
+		String(process.env.TOKEN_PLAN_API_PATH || '').trim() ||
+		'/api/v1/services/aigc/multimodal-generation/generation';
+
+	return {
+		enabled: !!apiKey,
+		baseUrl,
+		apiKey,
+		model,
+		size,
+		path
+	};
+}
+
 export function getAiModelStatus() {
 	const settings = getModelSettings();
 	return {
@@ -88,6 +109,108 @@ export function getAiModelStatus() {
 			MODEL_API_PATH: Boolean(settings.path),
 			MODEL_SYSTEM_PROMPT: Boolean(settings.systemPrompt)
 		}
+	};
+}
+
+export function getAiImageStatus() {
+	const settings = getImageSettings();
+	return {
+		enabled: settings.enabled,
+		model: settings.model,
+		size: settings.size,
+		baseUrl: settings.baseUrl ? new URL(settings.baseUrl).origin : '',
+		path: settings.path,
+		variables: {
+			TOKEN_PLAN_BASE_URL: Boolean(settings.baseUrl),
+			TOKEN_PLAN_API_KEY: Boolean(settings.apiKey),
+			TOKEN_PLAN_MODEL: Boolean(settings.model),
+			TOKEN_PLAN_IMAGE_SIZE: Boolean(settings.size),
+			TOKEN_PLAN_API_PATH: Boolean(settings.path)
+		}
+	};
+}
+
+function extractImageUrl(payload) {
+	const choices = payload?.output?.choices;
+	if (!Array.isArray(choices)) return '';
+
+	for (const choice of choices) {
+		const content = choice?.message?.content;
+		if (!Array.isArray(content)) continue;
+		for (const item of content) {
+			if (item && typeof item.image === 'string' && item.image.trim()) {
+				return item.image.trim();
+			}
+		}
+	}
+
+	return '';
+}
+
+export async function generateAiImage({
+	prompt,
+	model = '',
+	size = ''
+}) {
+	const settings = getImageSettings();
+	const cleanPrompt = String(prompt || '').trim();
+	const cleanModel = String(model || '').trim() || settings.model;
+	const cleanSize = String(size || '').trim() || settings.size;
+
+	if (!cleanPrompt) {
+		throw new Error('prompt is required');
+	}
+
+	if (!settings.enabled) {
+		throw new Error('TOKEN_PLAN_API_KEY is required');
+	}
+
+	const endpoint = new URL(settings.path, settings.baseUrl).toString();
+	const response = await fetch(endpoint, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${settings.apiKey}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			model: cleanModel,
+			input: {
+				messages: [
+					{
+						role: 'user',
+						content: [
+							{
+								text: cleanPrompt
+							}
+						]
+					}
+				]
+			},
+			parameters: {
+				size: cleanSize
+			}
+		})
+	});
+
+	const payload = await response.json().catch(() => null);
+	if (!response.ok) {
+		const message =
+			payload && typeof payload.message === 'string'
+				? payload.message
+				: `image request failed: ${response.status}`;
+		throw new Error(message);
+	}
+
+	const imageUrl = extractImageUrl(payload);
+	if (!imageUrl) {
+		throw new Error('image url not found');
+	}
+
+	return {
+		imageUrl,
+		model: cleanModel,
+		size: cleanSize,
+		raw: payload
 	};
 }
 
