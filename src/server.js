@@ -224,11 +224,13 @@ async function chatStreamHandler(req, res, url) {
 
 	const match = url.pathname.match(/^\/ai\/chat\/stream\/([^/]+)$/);
 	if (!match) return json(res, 404, { ok: false, error: 'not found' });
+	const cursor = Number(url.searchParams.get('cursor') || 0);
 
 	try {
 		const result = await pullAiChatStream(sql, {
 			userId: currentUser.sub,
-			streamId: match[1]
+			streamId: match[1],
+			cursor
 		});
 
 		return json(res, 200, { ok: true, ...result });

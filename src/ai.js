@@ -1,5 +1,9 @@
 const streamJobs = new Map();
 
+function sleep(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function normalizeConversation(row) {
 	return {
 		id: String(row.id),
@@ -85,49 +89,6 @@ export function getAiModelStatus() {
 			MODEL_SYSTEM_PROMPT: Boolean(settings.systemPrompt)
 		}
 	};
-}
-
-async function generateAssistantReply({ moduleSlug, content, history = [] }) {
-	const settings = getModelSettings();
-	if (!settings.enabled) {
-		return buildAssistantReply({ moduleSlug, content });
-	}
-
-	try {
-		const messages = [
-			{
-				role: 'system',
-				content: `${settings.systemPrompt}\n当前模块：${moduleSlug}\n你只需要给出与当前模块有关的回答。`
-			},
-			...history.slice(-20).map(message => ({
-				role: message.role === 'assistant' ? 'assistant' : 'user',
-				content: String(message.content || '')
-			}))
-		];
-
-		const response = await fetch(new URL(settings.path, settings.baseUrl).toString(), {
-			method: 'POST',
-			headers: {
-				authorization: `Bearer ${settings.apiKey}`,
-				'content-type': 'application/json'
-			},
-			body: JSON.stringify({
-				model: settings.model,
-				messages,
-				temperature: 0.7
-			})
-		});
-
-		const data = await response.json().catch(() => null);
-		const reply = data?.choices?.[0]?.message?.content?.trim();
-		if (response.ok && reply) {
-			return reply;
-		}
-	} catch {
-		// Fall through to the local reply.
-	}
-
-	return buildAssistantReply({ moduleSlug, content });
 }
 
 export async function ensureAiSchema(sql) {
@@ -232,6 +193,118 @@ function splitStreamText(text) {
 	return chunks;
 }
 
+async function streamFromModel(settings, history, content, onDelta) {
+	const endpoint = new URL(settings.path, settings.baseUrl).toString();
+	const response = await fetch(endpoint, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${settings.apiKey}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({
+			model: settings.model,
+			stream: true,
+			messages: [
+				{
+					role: 'system',
+					content: `${settings.systemPrompt}\n当前模块：chat\n你只需要给出与当前模块有关的回答。`
+				},
+				...history.slice(-20).map(message => ({
+					role: message.role === 'assistant' ? 'assistant' : 'user',
+					content: String(message.content || '')
+				})),
+				{ role: 'user', content }
+			],
+			temperature: 0.7
+		})
+	});
+
+	if (!response.ok || !response.body) {
+		throw new Error(`model request failed: ${response.status}`);
+	}
+
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = '';
+
+	while (true) {
+		const { value, done } = await reader.read();
+		if (done) break;
+
+		buffer += decoder.decode(value, { stream: true });
+		let boundary = buffer.indexOf('\n');
+		while (boundary !== -1) {
+			const line = buffer.slice(0, boundary).trim();
+			buffer = buffer.slice(boundary + 1);
+			boundary = buffer.indexOf('\n');
+
+			if (!line || !line.startsWith('data:')) continue;
+			const payload = line.slice(5).trim();
+			if (!payload || payload === '[DONE]') continue;
+
+			try {
+				const parsed = JSON.parse(payload);
+				const delta = parsed?.choices?.[0]?.delta?.content || '';
+				if (delta) onDelta(delta);
+			} catch {
+				// Ignore malformed streaming chunks and continue.
+			}
+		}
+	}
+}
+
+async function runStreamJob(sql, job, { moduleSlug, content, history }) {
+	const settings = getModelSettings();
+	let assistantContent = '';
+
+	try {
+		if (settings.enabled) {
+			await streamFromModel(settings, history, content, (delta) => {
+				assistantContent += delta;
+				job.assistantContent = assistantContent;
+			});
+		}
+	} catch {
+		assistantContent = '';
+	}
+
+	if (!assistantContent) {
+		const fallback = buildAssistantReply({ moduleSlug, content });
+		for (const chunk of splitStreamText(fallback)) {
+			assistantContent += chunk;
+			job.assistantContent = assistantContent;
+			await sleep(60);
+		}
+	}
+
+	job.assistantContent = assistantContent;
+
+	await sql.begin(async tx => {
+		await tx`
+			insert into ai_messages (conversation_id, role, content)
+			values (${job.conversationId}, 'assistant', ${assistantContent})
+		`;
+
+		await tx`
+			update ai_conversations
+			set
+				summary = ${assistantContent.slice(0, 160)},
+				last_message_at = now(),
+				updated_at = now()
+			where id = ${job.conversationId}
+		`;
+
+		const conversation = await getAiConversation(tx, job.userId, job.conversationId);
+		const messages = await listAiMessages(tx, job.userId, job.conversationId);
+		job.finalResult = {
+			conversation,
+			messages
+		};
+	});
+
+	job.done = true;
+}
+
 export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
 	const cleanContent = String(content || '').trim();
 	if (!cleanContent) {
@@ -273,23 +346,22 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 		`;
 
 		const history = await listAiMessages(tx, userId, conversation.id, 40);
-		const assistantContent = await generateAssistantReply({
-			moduleSlug: conversation.moduleSlug,
-			content: cleanContent,
-			history
-		});
-
 		const streamId = crypto.randomUUID();
-		streamJobs.set(streamId, {
+		const job = {
 			id: streamId,
 			userId: String(userId),
 			conversationId: String(conversation.id),
 			moduleSlug: String(conversation.moduleSlug || moduleSlug || 'chat'),
-			assistantContent,
-			chunks: splitStreamText(assistantContent),
-			cursor: 0,
+			assistantContent: '',
 			done: false,
 			finalResult: null
+		};
+
+		streamJobs.set(streamId, job);
+		void runStreamJob(sql, job, {
+			moduleSlug: conversation.moduleSlug,
+			content: cleanContent,
+			history
 		});
 
 		return {
@@ -306,66 +378,46 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 	});
 }
 
-async function persistStreamCompletion(sql, job) {
-	await sql.begin(async tx => {
-		await tx`
-			insert into ai_messages (conversation_id, role, content)
-			values (${job.conversationId}, 'assistant', ${job.assistantContent})
-		`;
-
-		await tx`
-			update ai_conversations
-			set
-				summary = ${job.assistantContent.slice(0, 160)},
-				last_message_at = now(),
-				updated_at = now()
-			where id = ${job.conversationId}
-		`;
-
-		const conversation = await getAiConversation(tx, job.userId, job.conversationId);
-		const messages = await listAiMessages(tx, job.userId, job.conversationId);
-		job.finalResult = {
-			conversation,
-			messages
-		};
-	});
-}
-
-export async function pullAiChatStream(sql, { userId, streamId }) {
+export async function pullAiChatStream(sql, { userId, streamId, cursor = 0 }) {
 	const job = streamJobs.get(String(streamId));
 	if (!job) {
-		return { done: true, delta: '', conversation: null, messages: [] };
+		return { done: true, delta: '', cursor: Number(cursor) || 0, conversation: null, messages: [] };
 	}
 
 	if (job.userId !== String(userId)) {
 		throw new Error('stream not found');
 	}
 
+	const safeCursor = Math.max(Number(cursor) || 0, 0);
+	const currentText = job.assistantContent || '';
+	const delta = currentText.slice(safeCursor);
+	const nextCursor = currentText.length;
+
 	if (job.done) {
 		return {
 			done: true,
-			delta: '',
+			delta,
+			cursor: nextCursor,
 			conversation: job.finalResult?.conversation || null,
 			messages: job.finalResult?.messages || []
 		};
 	}
 
-	const delta = job.chunks[job.cursor] || '';
-	job.cursor += 1;
-
-	if (job.cursor >= job.chunks.length) {
-		job.done = true;
-		await persistStreamCompletion(sql, job);
+	if (!currentText) {
 		return {
-			done: true,
-			delta,
-			conversation: job.finalResult?.conversation || null,
-			messages: job.finalResult?.messages || []
+			done: false,
+			delta: '',
+			cursor: safeCursor,
+			conversation: null,
+			messages: []
 		};
 	}
 
 	return {
 		done: false,
-		delta
+		delta,
+		cursor: nextCursor,
+		conversation: null,
+		messages: []
 	};
 }
