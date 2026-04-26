@@ -3,6 +3,7 @@ import postgres from 'postgres';
 import { signToken, verifyToken } from './token.js';
 import { verifyPassword } from './password.js';
 import { findUserByEmail } from './users.js';
+import { ensureAiSchema, ensureDefaultAiModules, listAiConversations, listAiModules } from './ai.js';
 
 const port = Number(process.env.PORT || 8787);
 const databaseUrl = process.env.DATABASE_URL;
@@ -77,6 +78,18 @@ function normalizeEmail(email) {
 	return String(email || '').trim().toLowerCase();
 }
 
+function getBearerToken(req) {
+	const auth = req.headers.authorization || '';
+	return auth.startsWith('Bearer ') ? auth.slice(7) : '';
+}
+
+function getCurrentUser(req) {
+	const token = getBearerToken(req);
+	if (!token) return null;
+
+	return verifyToken(token, authSecret);
+}
+
 async function loginHandler(req, res) {
 	let payload;
 	try {
@@ -143,6 +156,31 @@ async function meHandler(req, res) {
 	});
 }
 
+async function modulesHandler(req, res) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	const modules = await listAiModules(sql);
+	return json(res, 200, { ok: true, modules });
+}
+
+async function conversationsHandler(req, res, url) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	const moduleSlug = url.searchParams.get('module') || '';
+	const limit = Number(url.searchParams.get('limit') || 10);
+	const conversations = await listAiConversations(sql, currentUser.sub, {
+		moduleSlug,
+		limit
+	});
+
+	return json(res, 200, { ok: true, conversations });
+}
+
+await ensureAiSchema(sql);
+await ensureDefaultAiModules(sql);
+
 const server = http.createServer(async (req, res) => {
 	if (req.method === 'OPTIONS') {
 		res.writeHead(204, {
@@ -168,6 +206,16 @@ const server = http.createServer(async (req, res) => {
 
 	if (req.method === 'GET' && url.pathname === '/auth/me') {
 		await meHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'GET' && url.pathname === '/ai/modules') {
+		await modulesHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'GET' && url.pathname === '/ai/conversations') {
+		await conversationsHandler(req, res, url);
 		return;
 	}
 

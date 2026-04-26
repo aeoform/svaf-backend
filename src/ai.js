@@ -1,0 +1,174 @@
+const DEFAULT_AI_MODULES = [
+	{
+		slug: 'chat',
+		name: 'AI 对话',
+		tag: '主入口',
+		description: '聊天、追问、总结都从这里开始。后面你可以把模型切换、上下文管理和消息记录都接进来。',
+		action: '打开聊天',
+		note: '当前作为默认功能页。',
+		sortOrder: 0
+	},
+	{
+		slug: 'knowledge',
+		name: '知识库',
+		tag: '预留',
+		description: '以后可以放文档检索、笔记问答、站内资料库等能力，适合做更长流程的 AI 工具。',
+		action: '进入知识库',
+		note: '先留入口，后面直接接后端。',
+		sortOrder: 1
+	},
+	{
+		slug: 'image',
+		name: '图片生成',
+		tag: '预留',
+		description: '适合放文生图、图像重绘、头像生成这类能力，和对话模块分开后会更清楚。',
+		action: '进入图片页',
+		note: '以后可以单独接模型适配层。',
+		sortOrder: 2
+	},
+	{
+		slug: 'automation',
+		name: '自动化工具',
+		tag: '预留',
+		description: '以后可以接任务流、批处理、定时生成、内容整理等功能，方便把 AI 做成工具箱。',
+		action: '进入工具箱',
+		note: '适合后续扩展成工作台。',
+		sortOrder: 3
+	}
+];
+
+function normalizeModule(row) {
+	return {
+		slug: row.slug,
+		name: row.name,
+		tag: row.tag,
+		description: row.description,
+		action: row.action,
+		note: row.note,
+		sortOrder: row.sort_order,
+		isActive: row.is_active
+	};
+}
+
+function normalizeConversation(row) {
+	return {
+		id: String(row.id),
+		userId: String(row.user_id),
+		moduleSlug: row.module_slug,
+		title: row.title,
+		summary: row.summary,
+		isArchived: row.is_archived,
+		lastMessageAt: row.last_message_at,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at
+	};
+}
+
+export async function ensureDefaultAiModules(sql) {
+	for (const module of DEFAULT_AI_MODULES) {
+		await sql`
+			insert into ai_modules (
+				slug,
+				name,
+				tag,
+				description,
+				action,
+				note,
+				sort_order,
+				is_active
+			)
+			values (
+				${module.slug},
+				${module.name},
+				${module.tag},
+				${module.description},
+				${module.action},
+				${module.note},
+				${module.sortOrder},
+				${true}
+			)
+			on conflict (slug) do update set
+				name = excluded.name,
+				tag = excluded.tag,
+				description = excluded.description,
+				action = excluded.action,
+				note = excluded.note,
+				sort_order = excluded.sort_order,
+				is_active = excluded.is_active,
+				updated_at = now()
+		`;
+	}
+}
+
+export async function ensureAiSchema(sql) {
+	await sql`
+		create table if not exists ai_modules (
+			slug text primary key,
+			name text not null,
+			tag text not null default '',
+			description text not null default '',
+			action text not null default '',
+			note text not null default '',
+			sort_order integer not null default 0,
+			is_active boolean not null default true,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)
+	`;
+
+	await sql`
+		create table if not exists ai_conversations (
+			id bigserial primary key,
+			user_id bigint not null references auth_users (id) on delete cascade,
+			module_slug text not null references ai_modules (slug) on delete restrict,
+			title text not null default '',
+			summary text not null default '',
+			is_archived boolean not null default false,
+			last_message_at timestamptz not null default now(),
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)
+	`;
+
+	await sql`create index if not exists ai_modules_sort_idx on ai_modules (is_active, sort_order, slug)`;
+	await sql`
+		create index if not exists ai_conversations_user_last_message_idx
+		on ai_conversations (user_id, is_archived, last_message_at desc)
+	`;
+}
+
+export async function listAiModules(sql) {
+	const rows = await sql`
+		select slug, name, tag, description, action, note, sort_order, is_active
+		from ai_modules
+		where is_active = true
+		order by sort_order asc, slug asc
+	`;
+	return rows.map(normalizeModule);
+}
+
+export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 10 } = {}) {
+	const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 20);
+	const normalizedModuleSlug = String(moduleSlug || '').trim();
+
+	const rows = normalizedModuleSlug
+		? await sql`
+			select id, user_id, module_slug, title, summary, is_archived, last_message_at, created_at, updated_at
+			from ai_conversations
+			where user_id = ${userId}
+				and is_archived = false
+				and module_slug = ${normalizedModuleSlug}
+			order by last_message_at desc
+			limit ${safeLimit}
+		`
+		: await sql`
+			select id, user_id, module_slug, title, summary, is_archived, last_message_at, created_at, updated_at
+			from ai_conversations
+			where user_id = ${userId}
+				and is_archived = false
+			order by last_message_at desc
+			limit ${safeLimit}
+		`;
+
+	return rows.map(normalizeConversation);
+}
