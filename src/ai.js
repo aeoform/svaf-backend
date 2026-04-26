@@ -138,7 +138,7 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 				and is_archived = false
 				and module_slug = ${normalizedModuleSlug}
 			order by last_message_at desc
-			limit ${safeLimit}
+			limit ${safeLimit + 1}
 			offset ${safeOffset}
 		`
 		: await sql`
@@ -147,7 +147,7 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 			where user_id = ${userId}
 				and is_archived = false
 			order by last_message_at desc
-			limit ${safeLimit}
+			limit ${safeLimit + 1}
 			offset ${safeOffset}
 		`;
 
