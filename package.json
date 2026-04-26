@@ -1,0 +1,13 @@
+{
+	"name": "svaf-backend",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "node --watch --env-file=.env src/server.js",
+		"start": "node --env-file=.env src/server.js",
+		"hash-password": "node src/hash-password.js"
+	},
+	"dependencies": {
+		"postgres": "^3.4.7"
+	}
+}
