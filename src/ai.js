@@ -130,6 +130,8 @@ export async function ensureAiSchema(sql) {
 			user_id bigint not null references auth_users (id) on delete cascade,
 			conversation_id bigint not null references ai_conversations (id) on delete cascade,
 			module_slug text not null default 'chat',
+			client_request_id text not null default '',
+			user_content text not null default '',
 			assistant_content text not null default '',
 			done boolean not null default false,
 			created_at timestamptz not null default now(),
@@ -138,8 +140,24 @@ export async function ensureAiSchema(sql) {
 	`;
 
 	await sql`
+		alter table ai_stream_jobs
+		add column if not exists client_request_id text not null default ''
+	`;
+
+	await sql`
+		alter table ai_stream_jobs
+		add column if not exists user_content text not null default ''
+	`;
+
+	await sql`
 		create index if not exists ai_stream_jobs_user_done_updated_idx
 		on ai_stream_jobs (user_id, done, updated_at desc)
+	`;
+
+	await sql`
+		create unique index if not exists ai_stream_jobs_user_request_idx
+		on ai_stream_jobs (user_id, client_request_id)
+		where client_request_id <> ''
 	`;
 }
 
@@ -237,6 +255,8 @@ function normalizeStreamJob(row) {
 		userId: String(row.user_id),
 		conversationId: String(row.conversation_id),
 		moduleSlug: row.module_slug,
+		clientRequestId: row.client_request_id || '',
+		userContent: row.user_content || '',
 		assistantContent: row.assistant_content || '',
 		done: row.done,
 		createdAt: row.created_at,
@@ -251,6 +271,8 @@ async function upsertStreamJob(sql, job) {
 			user_id,
 			conversation_id,
 			module_slug,
+			client_request_id,
+			user_content,
 			assistant_content,
 			done,
 			updated_at
@@ -260,11 +282,15 @@ async function upsertStreamJob(sql, job) {
 			${job.userId},
 			${job.conversationId},
 			${job.moduleSlug},
+			${job.clientRequestId || ''},
+			${job.userContent || ''},
 			${job.assistantContent},
 			${job.done},
 			now()
 		)
 		on conflict (id) do update set
+			client_request_id = excluded.client_request_id,
+			user_content = excluded.user_content,
 			assistant_content = excluded.assistant_content,
 			done = excluded.done,
 			updated_at = now()
@@ -273,7 +299,7 @@ async function upsertStreamJob(sql, job) {
 
 async function getStreamJob(sql, userId, streamId) {
 	const rows = await sql`
-		select id, user_id, conversation_id, module_slug, assistant_content, done, created_at, updated_at
+		select id, user_id, conversation_id, module_slug, client_request_id, user_content, assistant_content, done, created_at, updated_at
 		from ai_stream_jobs
 		where id = ${streamId}
 			and user_id = ${userId}
@@ -397,13 +423,40 @@ async function runStreamJob(sql, job, { moduleSlug, content, history }) {
 	await upsertStreamJob(sql, job);
 }
 
-export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
+export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conversationId = null, content, clientRequestId = '' }) {
 	const cleanContent = String(content || '').trim();
+	const cleanRequestId = String(clientRequestId || '').trim();
 	if (!cleanContent) {
 		throw new Error('content is required');
 	}
 
 	return sql.begin(async tx => {
+		if (cleanRequestId) {
+			const existingRows = await tx`
+				select id, user_id, conversation_id, module_slug, client_request_id, user_content, assistant_content, done, created_at, updated_at
+				from ai_stream_jobs
+				where user_id = ${userId}
+					and client_request_id = ${cleanRequestId}
+				limit 1
+			`;
+
+			if (existingRows[0]) {
+				const existingJob = normalizeStreamJob(existingRows[0]);
+				const conversation = await getAiConversation(tx, userId, existingJob.conversationId);
+				return {
+					streamId: existingJob.id,
+					conversation,
+					userMessage: {
+						id: `client-request-${cleanRequestId}`,
+						conversationId: String(existingJob.conversationId),
+						role: 'user',
+						content: existingJob.userContent || cleanContent,
+						createdAt: existingJob.createdAt
+					}
+				};
+			}
+		}
+
 		let conversation = null;
 		if (conversationId) {
 			conversation = await getAiConversation(tx, userId, conversationId);
@@ -444,6 +497,8 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 			userId: String(userId),
 			conversationId: String(conversation.id),
 			moduleSlug: String(conversation.moduleSlug || moduleSlug || 'chat'),
+			clientRequestId: cleanRequestId,
+			userContent: cleanContent,
 			assistantContent: '',
 			done: false,
 			finalResult: null

@@ -212,7 +212,8 @@ async function chatStartHandler(req, res) {
 			userId: currentUser.sub,
 			moduleSlug: payload.moduleSlug || 'chat',
 			conversationId: payload.conversationId || null,
-			content: payload.content
+			content: payload.content,
+			clientRequestId: payload.clientRequestId || ''
 		});
 
 		return json(res, 200, { ok: true, ...result });

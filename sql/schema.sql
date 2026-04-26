@@ -39,6 +39,8 @@ create table if not exists ai_stream_jobs (
 	user_id bigint not null references auth_users (id) on delete cascade,
 	conversation_id bigint not null references ai_conversations (id) on delete cascade,
 	module_slug text not null default 'chat',
+	client_request_id text not null default '',
+	user_content text not null default '',
 	assistant_content text not null default '',
 	done boolean not null default false,
 	created_at timestamptz not null default now(),
@@ -47,3 +49,7 @@ create table if not exists ai_stream_jobs (
 
 create index if not exists ai_stream_jobs_user_done_updated_idx
 	on ai_stream_jobs (user_id, done, updated_at desc);
+
+create unique index if not exists ai_stream_jobs_user_request_idx
+	on ai_stream_jobs (user_id, client_request_id)
+	where client_request_id <> '';
