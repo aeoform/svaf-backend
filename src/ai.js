@@ -381,7 +381,7 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 		void runStreamJob(sql, job, {
 			moduleSlug: conversation.moduleSlug,
 			content: cleanContent,
-			history
+			history: history.messages
 		});
 
 		return {
