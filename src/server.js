@@ -5,13 +5,12 @@ import { verifyPassword } from './password.js';
 import { findUserByEmail } from './users.js';
 import {
 	ensureAiSchema,
-	ensureDefaultAiModules,
 	getAiModelStatus,
 	getAiConversation,
 	listAiConversations,
 	listAiMessages,
-	listAiModules,
-	sendAiChatMessage
+	pullAiChatStream,
+	startAiChatStream
 } from './ai.js';
 
 const port = Number(process.env.PORT || 8787);
@@ -165,14 +164,6 @@ async function meHandler(req, res) {
 	});
 }
 
-async function modulesHandler(req, res) {
-	const currentUser = getCurrentUser(req);
-	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
-
-	const modules = await listAiModules(sql);
-	return json(res, 200, { ok: true, modules });
-}
-
 async function conversationsHandler(req, res, url) {
 	const currentUser = getCurrentUser(req);
 	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
@@ -202,7 +193,7 @@ async function conversationMessagesHandler(req, res, url) {
 	return json(res, 200, { ok: true, conversation, messages });
 }
 
-async function chatHandler(req, res) {
+async function chatStartHandler(req, res) {
 	const currentUser = getCurrentUser(req);
 	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
 
@@ -214,7 +205,7 @@ async function chatHandler(req, res) {
 	}
 
 	try {
-		const result = await sendAiChatMessage(sql, {
+		const result = await startAiChatStream(sql, {
 			userId: currentUser.sub,
 			moduleSlug: payload.moduleSlug || 'chat',
 			conversationId: payload.conversationId || null,
@@ -224,6 +215,25 @@ async function chatHandler(req, res) {
 		return json(res, 200, { ok: true, ...result });
 	} catch (error) {
 		return json(res, 400, { ok: false, error: error.message || 'chat failed' });
+	}
+}
+
+async function chatStreamHandler(req, res, url) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	const match = url.pathname.match(/^\/ai\/chat\/stream\/([^/]+)$/);
+	if (!match) return json(res, 404, { ok: false, error: 'not found' });
+
+	try {
+		const result = await pullAiChatStream(sql, {
+			userId: currentUser.sub,
+			streamId: match[1]
+		});
+
+		return json(res, 200, { ok: true, ...result });
+	} catch (error) {
+		return json(res, 404, { ok: false, error: error.message || 'stream not found' });
 	}
 }
 
@@ -238,7 +248,6 @@ async function modelStatusHandler(req, res) {
 }
 
 await ensureAiSchema(sql);
-await ensureDefaultAiModules(sql);
 
 const server = http.createServer(async (req, res) => {
 	if (req.method === 'OPTIONS') {
@@ -268,11 +277,6 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
-	if (req.method === 'GET' && url.pathname === '/ai/modules') {
-		await modulesHandler(req, res);
-		return;
-	}
-
 	if (req.method === 'GET' && url.pathname === '/ai/conversations') {
 		await conversationsHandler(req, res, url);
 		return;
@@ -283,8 +287,13 @@ const server = http.createServer(async (req, res) => {
 		return;
 	}
 
-	if (req.method === 'POST' && url.pathname === '/ai/chat') {
-		await chatHandler(req, res);
+	if (req.method === 'POST' && url.pathname === '/ai/chat/start') {
+		await chatStartHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'GET' && /^\/ai\/chat\/stream\/[^/]+$/.test(url.pathname)) {
+		await chatStreamHandler(req, res, url);
 		return;
 	}
 

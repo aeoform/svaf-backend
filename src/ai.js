@@ -1,54 +1,4 @@
-const DEFAULT_AI_MODULES = [
-	{
-		slug: 'chat',
-		name: 'AI 对话',
-		tag: '主入口',
-		description: '聊天、追问、总结都从这里开始。后面你可以把模型切换、上下文管理和消息记录都接进来。',
-		action: '打开聊天',
-		note: '当前作为默认功能页。',
-		sortOrder: 0
-	},
-	{
-		slug: 'knowledge',
-		name: '知识库',
-		tag: '预留',
-		description: '以后可以放文档检索、笔记问答、站内资料库等能力，适合做更长流程的 AI 工具。',
-		action: '进入知识库',
-		note: '先留入口，后面直接接后端。',
-		sortOrder: 1
-	},
-	{
-		slug: 'image',
-		name: '图片生成',
-		tag: '预留',
-		description: '适合放文生图、图像重绘、头像生成这类能力，和对话模块分开后会更清楚。',
-		action: '进入图片页',
-		note: '以后可以单独接模型适配层。',
-		sortOrder: 2
-	},
-	{
-		slug: 'automation',
-		name: '自动化工具',
-		tag: '预留',
-		description: '以后可以接任务流、批处理、定时生成、内容整理等功能，方便把 AI 做成工具箱。',
-		action: '进入工具箱',
-		note: '适合后续扩展成工作台。',
-		sortOrder: 3
-	}
-];
-
-function normalizeModule(row) {
-	return {
-		slug: row.slug,
-		name: row.name,
-		tag: row.tag,
-		description: row.description,
-		action: row.action,
-		note: row.note,
-		sortOrder: row.sort_order,
-		isActive: row.is_active
-	};
-}
+const streamJobs = new Map();
 
 function normalizeConversation(row) {
 	return {
@@ -180,63 +130,12 @@ async function generateAssistantReply({ moduleSlug, content, history = [] }) {
 	return buildAssistantReply({ moduleSlug, content });
 }
 
-export async function ensureDefaultAiModules(sql) {
-	for (const module of DEFAULT_AI_MODULES) {
-		await sql`
-			insert into ai_modules (
-				slug,
-				name,
-				tag,
-				description,
-				action,
-				note,
-				sort_order,
-				is_active
-			)
-			values (
-				${module.slug},
-				${module.name},
-				${module.tag},
-				${module.description},
-				${module.action},
-				${module.note},
-				${module.sortOrder},
-				${true}
-			)
-			on conflict (slug) do update set
-				name = excluded.name,
-				tag = excluded.tag,
-				description = excluded.description,
-				action = excluded.action,
-				note = excluded.note,
-				sort_order = excluded.sort_order,
-				is_active = excluded.is_active,
-				updated_at = now()
-		`;
-	}
-}
-
 export async function ensureAiSchema(sql) {
-	await sql`
-		create table if not exists ai_modules (
-			slug text primary key,
-			name text not null,
-			tag text not null default '',
-			description text not null default '',
-			action text not null default '',
-			note text not null default '',
-			sort_order integer not null default 0,
-			is_active boolean not null default true,
-			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now()
-		)
-	`;
-
 	await sql`
 		create table if not exists ai_conversations (
 			id bigserial primary key,
 			user_id bigint not null references auth_users (id) on delete cascade,
-			module_slug text not null references ai_modules (slug) on delete restrict,
+			module_slug text not null default 'chat',
 			title text not null default '',
 			summary text not null default '',
 			is_archived boolean not null default false,
@@ -255,8 +154,6 @@ export async function ensureAiSchema(sql) {
 			created_at timestamptz not null default now()
 		)
 	`;
-
-	await sql`create index if not exists ai_modules_sort_idx on ai_modules (is_active, sort_order, slug)`;
 	await sql`
 		create index if not exists ai_conversations_user_last_message_idx
 		on ai_conversations (user_id, is_archived, last_message_at desc)
@@ -265,16 +162,6 @@ export async function ensureAiSchema(sql) {
 		create index if not exists ai_messages_conversation_created_idx
 		on ai_messages (conversation_id, created_at asc)
 	`;
-}
-
-export async function listAiModules(sql) {
-	const rows = await sql`
-		select slug, name, tag, description, action, note, sort_order, is_active
-		from ai_modules
-		where is_active = true
-		order by sort_order asc, slug asc
-	`;
-	return rows.map(normalizeModule);
 }
 
 export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 10 } = {}) {
@@ -330,10 +217,23 @@ export async function listAiMessages(sql, userId, conversationId, limit = 60) {
 	return rows.map(normalizeMessage);
 }
 
-export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
-	const cleanContent = String(content || '').trim();
-	const cleanModuleSlug = String(moduleSlug || 'chat').trim() || 'chat';
+function splitStreamText(text) {
+	const compact = String(text || '').trim();
+	if (!compact) return [''];
 
+	const chunks = [];
+	let index = 0;
+	const size = compact.length > 240 ? 18 : 12;
+	while (index < compact.length) {
+		chunks.push(compact.slice(index, index + size));
+		index += size;
+	}
+
+	return chunks;
+}
+
+export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
+	const cleanContent = String(content || '').trim();
 	if (!cleanContent) {
 		throw new Error('content is required');
 	}
@@ -349,7 +249,7 @@ export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conv
 				insert into ai_conversations (user_id, module_slug, title, summary, last_message_at)
 				values (
 					${userId},
-					${cleanModuleSlug},
+					${String(moduleSlug || 'chat') || 'chat'},
 					${buildConversationTitle(cleanContent)},
 					${cleanContent.slice(0, 160)},
 					now()
@@ -364,6 +264,14 @@ export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conv
 			values (${conversation.id}, 'user', ${cleanContent})
 		`;
 
+		await tx`
+			update ai_conversations
+			set
+				last_message_at = now(),
+				updated_at = now()
+			where id = ${conversation.id}
+		`;
+
 		const history = await listAiMessages(tx, userId, conversation.id, 40);
 		const assistantContent = await generateAssistantReply({
 			moduleSlug: conversation.moduleSlug,
@@ -371,33 +279,93 @@ export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conv
 			history
 		});
 
+		const streamId = crypto.randomUUID();
+		streamJobs.set(streamId, {
+			id: streamId,
+			userId: String(userId),
+			conversationId: String(conversation.id),
+			moduleSlug: String(conversation.moduleSlug || moduleSlug || 'chat'),
+			assistantContent,
+			chunks: splitStreamText(assistantContent),
+			cursor: 0,
+			done: false,
+			finalResult: null
+		});
+
+		return {
+			streamId,
+			conversation,
+			userMessage: {
+				id: String(Date.now()),
+				conversationId: String(conversation.id),
+				role: 'user',
+				content: cleanContent,
+				createdAt: new Date().toISOString()
+			}
+		};
+	});
+}
+
+async function persistStreamCompletion(sql, job) {
+	await sql.begin(async tx => {
 		await tx`
 			insert into ai_messages (conversation_id, role, content)
-			values (${conversation.id}, 'assistant', ${assistantContent})
+			values (${job.conversationId}, 'assistant', ${job.assistantContent})
 		`;
 
 		await tx`
 			update ai_conversations
 			set
-				module_slug = ${cleanModuleSlug},
-				title = case
-					when title = '' or title = '新对话' then ${buildConversationTitle(cleanContent)}
-					else title
-				end,
-				summary = ${assistantContent.slice(0, 160)},
+				summary = ${job.assistantContent.slice(0, 160)},
 				last_message_at = now(),
 				updated_at = now()
-			where id = ${conversation.id}
-				and user_id = ${userId}
+			where id = ${job.conversationId}
 		`;
 
-		const refreshedConversation = await getAiConversation(tx, userId, conversation.id);
-		const messages = await listAiMessages(tx, userId, conversation.id);
-
-		return {
-			conversation: refreshedConversation,
-			messages,
-			reply: assistantContent
+		const conversation = await getAiConversation(tx, job.userId, job.conversationId);
+		const messages = await listAiMessages(tx, job.userId, job.conversationId);
+		job.finalResult = {
+			conversation,
+			messages
 		};
 	});
+}
+
+export async function pullAiChatStream(sql, { userId, streamId }) {
+	const job = streamJobs.get(String(streamId));
+	if (!job) {
+		return { done: true, delta: '', conversation: null, messages: [] };
+	}
+
+	if (job.userId !== String(userId)) {
+		throw new Error('stream not found');
+	}
+
+	if (job.done) {
+		return {
+			done: true,
+			delta: '',
+			conversation: job.finalResult?.conversation || null,
+			messages: job.finalResult?.messages || []
+		};
+	}
+
+	const delta = job.chunks[job.cursor] || '';
+	job.cursor += 1;
+
+	if (job.cursor >= job.chunks.length) {
+		job.done = true;
+		await persistStreamCompletion(sql, job);
+		return {
+			done: true,
+			delta,
+			conversation: job.finalResult?.conversation || null,
+			messages: job.finalResult?.messages || []
+		};
+	}
+
+	return {
+		done: false,
+		delta
+	};
 }
