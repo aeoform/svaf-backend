@@ -97,6 +97,89 @@ function buildAssistantReply({ moduleSlug, content }) {
 	return `已记录到「${moduleSlug}」模块。当前是基础版对话，后面可以继续接真实能力。你说的是：${compact.slice(0, 180)}`;
 }
 
+function getModelSettings() {
+	const baseUrl = String(process.env.MODEL_API_BASE_URL || '').trim();
+	const apiKey = String(process.env.MODEL_API_KEY || '').trim();
+	const model = String(process.env.MODEL_MODEL || '').trim() || 'gpt-4o-mini';
+	const provider = String(process.env.MODEL_PROVIDER || '').trim() || 'openai-compatible';
+	const path = String(process.env.MODEL_API_PATH || '').trim() || '/v1/chat/completions';
+	const systemPrompt =
+		String(process.env.MODEL_SYSTEM_PROMPT || '').trim() ||
+		'你是云外拾光站点里的 AI 助手，回答要简洁、准确、用中文。';
+
+	return {
+		enabled: !!baseUrl && !!apiKey,
+		baseUrl,
+		apiKey,
+		model,
+		provider,
+		path,
+		systemPrompt
+	};
+}
+
+export function getAiModelStatus() {
+	const settings = getModelSettings();
+	return {
+		enabled: settings.enabled,
+		provider: settings.provider,
+		model: settings.model,
+		baseUrl: settings.baseUrl ? new URL(settings.baseUrl).origin : '',
+		path: settings.path,
+		variables: {
+			MODEL_API_BASE_URL: Boolean(settings.baseUrl),
+			MODEL_API_KEY: Boolean(settings.apiKey),
+			MODEL_MODEL: Boolean(settings.model),
+			MODEL_PROVIDER: Boolean(settings.provider),
+			MODEL_API_PATH: Boolean(settings.path),
+			MODEL_SYSTEM_PROMPT: Boolean(settings.systemPrompt)
+		}
+	};
+}
+
+async function generateAssistantReply({ moduleSlug, content, history = [] }) {
+	const settings = getModelSettings();
+	if (!settings.enabled) {
+		return buildAssistantReply({ moduleSlug, content });
+	}
+
+	try {
+		const messages = [
+			{
+				role: 'system',
+				content: `${settings.systemPrompt}\n当前模块：${moduleSlug}\n你只需要给出与当前模块有关的回答。`
+			},
+			...history.slice(-20).map(message => ({
+				role: message.role === 'assistant' ? 'assistant' : 'user',
+				content: String(message.content || '')
+			}))
+		];
+
+		const response = await fetch(new URL(settings.path, settings.baseUrl).toString(), {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${settings.apiKey}`,
+				'content-type': 'application/json'
+			},
+			body: JSON.stringify({
+				model: settings.model,
+				messages,
+				temperature: 0.7
+			})
+		});
+
+		const data = await response.json().catch(() => null);
+		const reply = data?.choices?.[0]?.message?.content?.trim();
+		if (response.ok && reply) {
+			return reply;
+		}
+	} catch {
+		// Fall through to the local reply.
+	}
+
+	return buildAssistantReply({ moduleSlug, content });
+}
+
 export async function ensureDefaultAiModules(sql) {
 	for (const module of DEFAULT_AI_MODULES) {
 		await sql`
@@ -281,9 +364,11 @@ export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conv
 			values (${conversation.id}, 'user', ${cleanContent})
 		`;
 
-		const assistantContent = buildAssistantReply({
+		const history = await listAiMessages(tx, userId, conversation.id, 40);
+		const assistantContent = await generateAssistantReply({
 			moduleSlug: conversation.moduleSlug,
-			content: cleanContent
+			content: cleanContent,
+			history
 		});
 
 		await tx`

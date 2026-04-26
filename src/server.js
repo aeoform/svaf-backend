@@ -6,6 +6,7 @@ import { findUserByEmail } from './users.js';
 import {
 	ensureAiSchema,
 	ensureDefaultAiModules,
+	getAiModelStatus,
 	getAiConversation,
 	listAiConversations,
 	listAiMessages,
@@ -226,6 +227,16 @@ async function chatHandler(req, res) {
 	}
 }
 
+async function modelStatusHandler(req, res) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	return json(res, 200, {
+		ok: true,
+		model: getAiModelStatus()
+	});
+}
+
 await ensureAiSchema(sql);
 await ensureDefaultAiModules(sql);
 
@@ -274,6 +285,11 @@ const server = http.createServer(async (req, res) => {
 
 	if (req.method === 'POST' && url.pathname === '/ai/chat') {
 		await chatHandler(req, res);
+		return;
+	}
+
+	if (req.method === 'GET' && url.pathname === '/ai/model-status') {
+		await modelStatusHandler(req, res);
 		return;
 	}
 

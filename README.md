@@ -17,10 +17,20 @@ Copy `.env.example` to `.env` and fill:
 - `DATABASE_URL`
 - `AUTH_SECRET`
 - `CORS_ORIGIN`
+- `MODEL_API_BASE_URL`
+- `MODEL_API_KEY`
+- `MODEL_MODEL`
+- `MODEL_PROVIDER`
+- `MODEL_API_PATH`
+- `MODEL_SYSTEM_PROMPT`
 
 If you deploy the backend on Alibaba Cloud and use GitHub Actions or a similar
 pipeline, keep `DATABASE_URL` and `AUTH_SECRET` as deployment secrets. The
 frontend must not read `DATABASE_URL`; it only needs the auth service URL.
+
+If you want `/ai/chat` to call a cloud model, set `MODEL_API_BASE_URL` and
+`MODEL_API_KEY` to an OpenAI-compatible endpoint. If those are missing, the
+backend falls back to the built-in local reply.
 
 ## Database
 
