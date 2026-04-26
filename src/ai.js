@@ -210,6 +210,20 @@ export async function getAiConversation(sql, userId, conversationId) {
 	return rows[0] ? normalizeConversation(rows[0]) : null;
 }
 
+export async function getActiveAiStreamJob(sql, userId, conversationId) {
+	const rows = await sql`
+		select id, user_id, conversation_id, module_slug, client_request_id, user_content, assistant_content, done, created_at, updated_at
+		from ai_stream_jobs
+		where user_id = ${userId}
+			and conversation_id = ${conversationId}
+			and done = false
+		order by updated_at desc, created_at desc
+		limit 1
+	`;
+
+	return rows[0] ? normalizeStreamJob(rows[0]) : null;
+}
+
 export async function listAiMessages(sql, userId, conversationId, limit = 200, offset = 0) {
 	const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 20000);
 	const safeOffset = Math.max(Number(offset) || 0, 0);

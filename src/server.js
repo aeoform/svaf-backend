@@ -5,6 +5,7 @@ import { verifyPassword } from './password.js';
 import { findUserByEmail } from './users.js';
 import {
 	ensureAiSchema,
+	getActiveAiStreamJob,
 	getAiModelStatus,
 	getAiConversation,
 	listAiConversations,
@@ -193,7 +194,19 @@ async function conversationMessagesHandler(req, res, url) {
 	const limit = Number(url.searchParams.get('limit') || 200);
 	const offset = Number(url.searchParams.get('offset') || 0);
 	const result = await listAiMessages(sql, currentUser.sub, match[1], limit, offset);
-	return json(res, 200, { conversation, ...result });
+	const activeStream = await getActiveAiStreamJob(sql, currentUser.sub, match[1]);
+	return json(res, 200, {
+		conversation,
+		...result,
+		activeStream: activeStream
+			? {
+					streamId: activeStream.id,
+					assistantContent: activeStream.assistantContent,
+					done: activeStream.done,
+					cursor: activeStream.assistantContent.length
+				}
+			: null
+	});
 }
 
 async function chatStartHandler(req, res) {
