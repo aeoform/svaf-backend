@@ -36,6 +36,15 @@ create table if not exists ai_conversations (
 	updated_at timestamptz not null default now()
 );
 
+create table if not exists ai_messages (
+	id bigserial primary key,
+	conversation_id bigint not null references ai_conversations (id) on delete cascade,
+	role text not null,
+	content text not null,
+	created_at timestamptz not null default now()
+);
+
 create index if not exists ai_modules_sort_idx on ai_modules (is_active, sort_order, slug);
 create index if not exists ai_conversations_user_last_message_idx
 	on ai_conversations (user_id, is_archived, last_message_at desc);
+create index if not exists ai_messages_conversation_created_idx on ai_messages (conversation_id, created_at asc);

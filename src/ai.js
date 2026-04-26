@@ -64,6 +64,39 @@ function normalizeConversation(row) {
 	};
 }
 
+function normalizeMessage(row) {
+	return {
+		id: String(row.id),
+		conversationId: String(row.conversation_id),
+		role: row.role,
+		content: row.content,
+		createdAt: row.created_at
+	};
+}
+
+function buildConversationTitle(content) {
+	const compact = String(content || '')
+		.trim()
+		.replace(/\s+/g, ' ');
+	if (!compact) return '新对话';
+	return compact.length > 24 ? `${compact.slice(0, 24)}...` : compact;
+}
+
+function buildAssistantReply({ moduleSlug, content }) {
+	const compact = String(content || '')
+		.trim()
+		.replace(/\s+/g, ' ');
+	if (!compact) {
+		return '我已经收到你的消息。你可以继续补充细节，我会保留这段对话。';
+	}
+
+	if (moduleSlug === 'chat') {
+		return `收到。当前还是基础对话模式，后面可以接真实模型。你刚才说的是：${compact.slice(0, 180)}`;
+	}
+
+	return `已记录到「${moduleSlug}」模块。当前是基础版对话，后面可以继续接真实能力。你说的是：${compact.slice(0, 180)}`;
+}
+
 export async function ensureDefaultAiModules(sql) {
 	for (const module of DEFAULT_AI_MODULES) {
 		await sql`
@@ -130,10 +163,24 @@ export async function ensureAiSchema(sql) {
 		)
 	`;
 
+	await sql`
+		create table if not exists ai_messages (
+			id bigserial primary key,
+			conversation_id bigint not null references ai_conversations (id) on delete cascade,
+			role text not null,
+			content text not null,
+			created_at timestamptz not null default now()
+		)
+	`;
+
 	await sql`create index if not exists ai_modules_sort_idx on ai_modules (is_active, sort_order, slug)`;
 	await sql`
 		create index if not exists ai_conversations_user_last_message_idx
 		on ai_conversations (user_id, is_archived, last_message_at desc)
+	`;
+	await sql`
+		create index if not exists ai_messages_conversation_created_idx
+		on ai_messages (conversation_id, created_at asc)
 	`;
 }
 
@@ -171,4 +218,101 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 		`;
 
 	return rows.map(normalizeConversation);
+}
+
+export async function getAiConversation(sql, userId, conversationId) {
+	const rows = await sql`
+		select id, user_id, module_slug, title, summary, is_archived, last_message_at, created_at, updated_at
+		from ai_conversations
+		where id = ${conversationId}
+			and user_id = ${userId}
+			and is_archived = false
+		limit 1
+	`;
+
+	return rows[0] ? normalizeConversation(rows[0]) : null;
+}
+
+export async function listAiMessages(sql, userId, conversationId, limit = 60) {
+	const rows = await sql`
+		select m.id, m.conversation_id, m.role, m.content, m.created_at
+		from ai_messages m
+		join ai_conversations c on c.id = m.conversation_id
+		where m.conversation_id = ${conversationId}
+			and c.user_id = ${userId}
+		order by m.created_at asc
+		limit ${Math.min(Math.max(Number(limit) || 60, 1), 120)}
+	`;
+
+	return rows.map(normalizeMessage);
+}
+
+export async function sendAiChatMessage(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
+	const cleanContent = String(content || '').trim();
+	const cleanModuleSlug = String(moduleSlug || 'chat').trim() || 'chat';
+
+	if (!cleanContent) {
+		throw new Error('content is required');
+	}
+
+	return sql.begin(async tx => {
+		let conversation = null;
+		if (conversationId) {
+			conversation = await getAiConversation(tx, userId, conversationId);
+		}
+
+		if (!conversation) {
+			const created = await tx`
+				insert into ai_conversations (user_id, module_slug, title, summary, last_message_at)
+				values (
+					${userId},
+					${cleanModuleSlug},
+					${buildConversationTitle(cleanContent)},
+					${cleanContent.slice(0, 160)},
+					now()
+				)
+				returning id, user_id, module_slug, title, summary, is_archived, last_message_at, created_at, updated_at
+			`;
+			conversation = normalizeConversation(created[0]);
+		}
+
+		await tx`
+			insert into ai_messages (conversation_id, role, content)
+			values (${conversation.id}, 'user', ${cleanContent})
+		`;
+
+		const assistantContent = buildAssistantReply({
+			moduleSlug: conversation.moduleSlug,
+			content: cleanContent
+		});
+
+		await tx`
+			insert into ai_messages (conversation_id, role, content)
+			values (${conversation.id}, 'assistant', ${assistantContent})
+		`;
+
+		await tx`
+			update ai_conversations
+			set
+				module_slug = ${cleanModuleSlug},
+				title = case
+					when title = '' or title = '新对话' then ${buildConversationTitle(cleanContent)}
+					else title
+				end,
+				summary = ${assistantContent.slice(0, 160)},
+				last_message_at = now(),
+				updated_at = now()
+			where id = ${conversation.id}
+				and user_id = ${userId}
+		`;
+
+		const refreshedConversation = await getAiConversation(tx, userId, conversation.id);
+		const messages = await listAiMessages(tx, userId, conversation.id);
+
+		return {
+			conversation: refreshedConversation,
+			messages,
+			reply: assistantContent
+		};
+	});
 }

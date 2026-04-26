@@ -3,7 +3,15 @@ import postgres from 'postgres';
 import { signToken, verifyToken } from './token.js';
 import { verifyPassword } from './password.js';
 import { findUserByEmail } from './users.js';
-import { ensureAiSchema, ensureDefaultAiModules, listAiConversations, listAiModules } from './ai.js';
+import {
+	ensureAiSchema,
+	ensureDefaultAiModules,
+	getAiConversation,
+	listAiConversations,
+	listAiMessages,
+	listAiModules,
+	sendAiChatMessage
+} from './ai.js';
 
 const port = Number(process.env.PORT || 8787);
 const databaseUrl = process.env.DATABASE_URL;
@@ -178,6 +186,46 @@ async function conversationsHandler(req, res, url) {
 	return json(res, 200, { ok: true, conversations });
 }
 
+async function conversationMessagesHandler(req, res, url) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	const match = url.pathname.match(/^\/ai\/conversations\/(\d+)\/messages$/);
+	if (!match) return json(res, 404, { ok: false, error: 'not found' });
+
+	const conversation = await getAiConversation(sql, currentUser.sub, match[1]);
+	if (!conversation) return json(res, 404, { ok: false, error: 'conversation not found' });
+
+	const limit = Number(url.searchParams.get('limit') || 60);
+	const messages = await listAiMessages(sql, currentUser.sub, match[1], limit);
+	return json(res, 200, { ok: true, conversation, messages });
+}
+
+async function chatHandler(req, res) {
+	const currentUser = getCurrentUser(req);
+	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
+
+	let payload;
+	try {
+		payload = await readJson(req);
+	} catch (error) {
+		return json(res, 400, { ok: false, error: error.message });
+	}
+
+	try {
+		const result = await sendAiChatMessage(sql, {
+			userId: currentUser.sub,
+			moduleSlug: payload.moduleSlug || 'chat',
+			conversationId: payload.conversationId || null,
+			content: payload.content
+		});
+
+		return json(res, 200, { ok: true, ...result });
+	} catch (error) {
+		return json(res, 400, { ok: false, error: error.message || 'chat failed' });
+	}
+}
+
 await ensureAiSchema(sql);
 await ensureDefaultAiModules(sql);
 
@@ -216,6 +264,16 @@ const server = http.createServer(async (req, res) => {
 
 	if (req.method === 'GET' && url.pathname === '/ai/conversations') {
 		await conversationsHandler(req, res, url);
+		return;
+	}
+
+	if (req.method === 'GET' && /^\/ai\/conversations\/\d+\/messages$/.test(url.pathname)) {
+		await conversationMessagesHandler(req, res, url);
+		return;
+	}
+
+	if (req.method === 'POST' && url.pathname === '/ai/chat') {
+		await chatHandler(req, res);
 		return;
 	}
 
