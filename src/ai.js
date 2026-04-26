@@ -123,6 +123,24 @@ export async function ensureAiSchema(sql) {
 		create index if not exists ai_messages_conversation_created_idx
 		on ai_messages (conversation_id, created_at asc)
 	`;
+
+	await sql`
+		create table if not exists ai_stream_jobs (
+			id text primary key,
+			user_id bigint not null references auth_users (id) on delete cascade,
+			conversation_id bigint not null references ai_conversations (id) on delete cascade,
+			module_slug text not null default 'chat',
+			assistant_content text not null default '',
+			done boolean not null default false,
+			created_at timestamptz not null default now(),
+			updated_at timestamptz not null default now()
+		)
+	`;
+
+	await sql`
+		create index if not exists ai_stream_jobs_user_done_updated_idx
+		on ai_stream_jobs (user_id, done, updated_at desc)
+	`;
 }
 
 export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 100, offset = 0 } = {}) {
@@ -213,6 +231,58 @@ function splitStreamText(text) {
 	return chunks;
 }
 
+function normalizeStreamJob(row) {
+	return {
+		id: String(row.id),
+		userId: String(row.user_id),
+		conversationId: String(row.conversation_id),
+		moduleSlug: row.module_slug,
+		assistantContent: row.assistant_content || '',
+		done: row.done,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at
+	};
+}
+
+async function upsertStreamJob(sql, job) {
+	await sql`
+		insert into ai_stream_jobs (
+			id,
+			user_id,
+			conversation_id,
+			module_slug,
+			assistant_content,
+			done,
+			updated_at
+		)
+		values (
+			${job.id},
+			${job.userId},
+			${job.conversationId},
+			${job.moduleSlug},
+			${job.assistantContent},
+			${job.done},
+			now()
+		)
+		on conflict (id) do update set
+			assistant_content = excluded.assistant_content,
+			done = excluded.done,
+			updated_at = now()
+	`;
+}
+
+async function getStreamJob(sql, userId, streamId) {
+	const rows = await sql`
+		select id, user_id, conversation_id, module_slug, assistant_content, done, created_at, updated_at
+		from ai_stream_jobs
+		where id = ${streamId}
+			and user_id = ${userId}
+		limit 1
+	`;
+
+	return rows[0] ? normalizeStreamJob(rows[0]) : null;
+}
+
 async function streamFromModel(settings, history, content, onDelta) {
 	const endpoint = new URL(settings.path, settings.baseUrl).toString();
 	const response = await fetch(endpoint, {
@@ -298,6 +368,7 @@ async function runStreamJob(sql, job, { moduleSlug, content, history }) {
 	}
 
 	job.assistantContent = assistantContent;
+	await upsertStreamJob(sql, job);
 
 	await sql.begin(async tx => {
 		await tx`
@@ -323,6 +394,7 @@ async function runStreamJob(sql, job, { moduleSlug, content, history }) {
 	});
 
 	job.done = true;
+	await upsertStreamJob(sql, job);
 }
 
 export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conversationId = null, content }) {
@@ -378,6 +450,7 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 		};
 
 		streamJobs.set(streamId, job);
+		await upsertStreamJob(tx, job);
 		void runStreamJob(sql, job, {
 			moduleSlug: conversation.moduleSlug,
 			content: cleanContent,
@@ -399,9 +472,23 @@ export async function startAiChatStream(sql, { userId, moduleSlug = 'chat', conv
 }
 
 export async function pullAiChatStream(sql, { userId, streamId, cursor = 0 }) {
-	const job = streamJobs.get(String(streamId));
+	const streamKey = String(streamId);
+	let job = streamJobs.get(streamKey);
 	if (!job) {
-		return { done: true, delta: '', cursor: Number(cursor) || 0, conversation: null, messages: [] };
+		const persisted = await getStreamJob(sql, userId, streamKey);
+		if (!persisted) {
+			return { done: true, delta: '', cursor: Number(cursor) || 0, conversation: null, messages: [] };
+		}
+		job = {
+			id: persisted.id,
+			userId: persisted.userId,
+			conversationId: persisted.conversationId,
+			moduleSlug: persisted.moduleSlug,
+			assistantContent: persisted.assistantContent,
+			done: persisted.done,
+			finalResult: null
+		};
+		streamJobs.set(streamKey, job);
 	}
 
 	if (job.userId !== String(userId)) {
@@ -414,12 +501,19 @@ export async function pullAiChatStream(sql, { userId, streamId, cursor = 0 }) {
 	const nextCursor = currentText.length;
 
 	if (job.done) {
+		const conversation =
+			job.finalResult?.conversation ||
+			(await getAiConversation(sql, userId, job.conversationId));
+		const messages =
+			job.finalResult?.messages ||
+			(await listAiMessages(sql, userId, job.conversationId, 400, 0)).messages;
+
 		return {
 			done: true,
 			delta,
 			cursor: nextCursor,
-			conversation: job.finalResult?.conversation || null,
-			messages: job.finalResult?.messages || []
+			conversation: conversation || null,
+			messages
 		};
 	}
 
