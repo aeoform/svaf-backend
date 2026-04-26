@@ -169,13 +169,15 @@ async function conversationsHandler(req, res, url) {
 	if (!currentUser) return json(res, 401, { ok: false, error: 'missing token' });
 
 	const moduleSlug = url.searchParams.get('module') || '';
-	const limit = Number(url.searchParams.get('limit') || 10);
-	const conversations = await listAiConversations(sql, currentUser.sub, {
+	const limit = Number(url.searchParams.get('limit') || 100);
+	const offset = Number(url.searchParams.get('offset') || 0);
+	const result = await listAiConversations(sql, currentUser.sub, {
 		moduleSlug,
-		limit
+		limit,
+		offset
 	});
 
-	return json(res, 200, { ok: true, conversations });
+	return json(res, 200, result);
 }
 
 async function conversationMessagesHandler(req, res, url) {
@@ -188,9 +190,10 @@ async function conversationMessagesHandler(req, res, url) {
 	const conversation = await getAiConversation(sql, currentUser.sub, match[1]);
 	if (!conversation) return json(res, 404, { ok: false, error: 'conversation not found' });
 
-	const limit = Number(url.searchParams.get('limit') || 60);
-	const messages = await listAiMessages(sql, currentUser.sub, match[1], limit);
-	return json(res, 200, { ok: true, conversation, messages });
+	const limit = Number(url.searchParams.get('limit') || 200);
+	const offset = Number(url.searchParams.get('offset') || 0);
+	const result = await listAiMessages(sql, currentUser.sub, match[1], limit, offset);
+	return json(res, 200, { conversation, ...result });
 }
 
 async function chatStartHandler(req, res) {

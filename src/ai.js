@@ -125,8 +125,9 @@ export async function ensureAiSchema(sql) {
 	`;
 }
 
-export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 10 } = {}) {
-	const safeLimit = Math.min(Math.max(Number(limit) || 10, 1), 20);
+export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 100, offset = 0 } = {}) {
+	const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
+	const safeOffset = Math.max(Number(offset) || 0, 0);
 	const normalizedModuleSlug = String(moduleSlug || '').trim();
 
 	const rows = normalizedModuleSlug
@@ -138,6 +139,7 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 				and module_slug = ${normalizedModuleSlug}
 			order by last_message_at desc
 			limit ${safeLimit}
+			offset ${safeOffset}
 		`
 		: await sql`
 			select id, user_id, module_slug, title, summary, is_archived, last_message_at, created_at, updated_at
@@ -146,9 +148,17 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 				and is_archived = false
 			order by last_message_at desc
 			limit ${safeLimit}
+			offset ${safeOffset}
 		`;
 
-	return rows.map(normalizeConversation);
+	const hasMore = rows.length > safeLimit;
+	const sliced = hasMore ? rows.slice(0, safeLimit) : rows;
+
+	return {
+		conversations: sliced.map(normalizeConversation),
+		hasMore,
+		nextOffset: safeOffset + sliced.length
+	};
 }
 
 export async function getAiConversation(sql, userId, conversationId) {
@@ -164,7 +174,9 @@ export async function getAiConversation(sql, userId, conversationId) {
 	return rows[0] ? normalizeConversation(rows[0]) : null;
 }
 
-export async function listAiMessages(sql, userId, conversationId, limit = 60) {
+export async function listAiMessages(sql, userId, conversationId, limit = 200, offset = 0) {
+	const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 400);
+	const safeOffset = Math.max(Number(offset) || 0, 0);
 	const rows = await sql`
 		select m.id, m.conversation_id, m.role, m.content, m.created_at
 		from ai_messages m
@@ -172,10 +184,18 @@ export async function listAiMessages(sql, userId, conversationId, limit = 60) {
 		where m.conversation_id = ${conversationId}
 			and c.user_id = ${userId}
 		order by m.created_at asc
-		limit ${Math.min(Math.max(Number(limit) || 60, 1), 120)}
+		limit ${safeLimit + 1}
+		offset ${safeOffset}
 	`;
 
-	return rows.map(normalizeMessage);
+	const hasMore = rows.length > safeLimit;
+	const sliced = hasMore ? rows.slice(0, safeLimit) : rows;
+
+	return {
+		messages: sliced.map(normalizeMessage),
+		hasMore,
+		nextOffset: safeOffset + sliced.length
+	};
 }
 
 function splitStreamText(text) {
@@ -295,10 +315,10 @@ async function runStreamJob(sql, job, { moduleSlug, content, history }) {
 		`;
 
 		const conversation = await getAiConversation(tx, job.userId, job.conversationId);
-		const messages = await listAiMessages(tx, job.userId, job.conversationId);
+		const messages = await listAiMessages(tx, job.userId, job.conversationId, 400, 0);
 		job.finalResult = {
 			conversation,
-			messages
+			messages: messages.messages
 		};
 	});
 
