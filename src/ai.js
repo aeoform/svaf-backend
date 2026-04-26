@@ -126,7 +126,7 @@ export async function ensureAiSchema(sql) {
 }
 
 export async function listAiConversations(sql, userId, { moduleSlug = '', limit = 100, offset = 0 } = {}) {
-	const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 200);
+	const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 10000);
 	const safeOffset = Math.max(Number(offset) || 0, 0);
 	const normalizedModuleSlug = String(moduleSlug || '').trim();
 
@@ -137,7 +137,7 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 			where user_id = ${userId}
 				and is_archived = false
 				and module_slug = ${normalizedModuleSlug}
-			order by last_message_at desc
+			order by last_message_at desc, id desc
 			limit ${safeLimit + 1}
 			offset ${safeOffset}
 		`
@@ -146,7 +146,7 @@ export async function listAiConversations(sql, userId, { moduleSlug = '', limit 
 			from ai_conversations
 			where user_id = ${userId}
 				and is_archived = false
-			order by last_message_at desc
+			order by last_message_at desc, id desc
 			limit ${safeLimit + 1}
 			offset ${safeOffset}
 		`;
@@ -175,7 +175,7 @@ export async function getAiConversation(sql, userId, conversationId) {
 }
 
 export async function listAiMessages(sql, userId, conversationId, limit = 200, offset = 0) {
-	const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 400);
+	const safeLimit = Math.min(Math.max(Number(limit) || 200, 1), 20000);
 	const safeOffset = Math.max(Number(offset) || 0, 0);
 	const rows = await sql`
 		select m.id, m.conversation_id, m.role, m.content, m.created_at
@@ -183,7 +183,7 @@ export async function listAiMessages(sql, userId, conversationId, limit = 200, o
 		join ai_conversations c on c.id = m.conversation_id
 		where m.conversation_id = ${conversationId}
 			and c.user_id = ${userId}
-		order by m.created_at asc
+		order by m.created_at asc, m.id asc
 		limit ${safeLimit + 1}
 		offset ${safeOffset}
 	`;
